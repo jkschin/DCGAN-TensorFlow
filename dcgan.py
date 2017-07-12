@@ -75,12 +75,13 @@ class DCGAN:
         d_loss_real = tf.reduce_mean(
             tf.nn.sigmoid_cross_entropy_with_logits(
               logits=D_logits_real,
-              labels=tf.ones_like(D_logits_real)))
+              labels=tf.ones_like(D_logits_real)),
+              name='d_loss_real')
         d_loss_fake = tf.reduce_mean(
             tf.nn.sigmoid_cross_entropy_with_logits(
               logits=D_logits_fake,
               labels=tf.zeros_like(D_logits_fake)),
-            name='d_loss_fake')
+              name='d_loss_fake')
         d_loss = d_loss_real + d_loss_fake
 
       if mode == tf.estimator.ModeKeys.TRAIN:
@@ -101,11 +102,8 @@ class DCGAN:
         def g_loss_fn(): return g_loss
         def d_loss_fn(): return d_loss
 
-        # train_op = tf.cond(train_gen, g_optim_fn, d_optim_fn)
-        # loss = tf.cond(train_gen, g_loss_fn, d_loss_fn)
-
-        train_op = d_optim
-        loss = d_loss
+        train_op = tf.cond(train_gen, g_optim_fn, d_optim_fn)
+        loss = tf.cond(train_gen, g_loss_fn, d_loss_fn)
 
       predictions = {
           'sampled_images': sampled_images,
@@ -118,9 +116,10 @@ class DCGAN:
         model_fn=dcgan_fn,
         model_dir='/tmp/dcgan_model')
     tensors_to_log = {'d_loss_fake': 'd_loss_fake',
+                      'd_loss_real': 'd_loss_real',
                       'global_step': 'global_step'}
     logging_hook = tf.train.LoggingTensorHook(
-        tensors=tensors_to_log, every_n_secs=1)
+        tensors=tensors_to_log, every_n_iter=10)
     dcgan.train(input_fn=self.input_fn, hooks=[logging_hook])
 
 
@@ -263,11 +262,11 @@ class Input:
 def main():
   features = None
   labels = None
-  batch_size = 1
+  batch_size = 100
   z_dim = 100
   learning_rate = 0.01
   num_g_steps = 1
-  num_d_steps = 1
+  num_d_steps = 5
   dcgan = DCGAN(features, labels, batch_size, z_dim, learning_rate,
       num_g_steps, num_d_steps)
   dcgan.train()
