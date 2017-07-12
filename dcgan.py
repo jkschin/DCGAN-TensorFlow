@@ -1,4 +1,4 @@
-import cv2
+# import cv2
 import numpy as np
 import os
 import tensorflow as tf
@@ -14,98 +14,199 @@ def leaky_relu(x):
     return x
 
 class DCGAN:
-  def __init__(self, features, labels, mode):
-    with tf.variable_scope('generator'):
-      self.G = generator()
-    with tf.variable_scope('discriminator'):
-      self.D = discriminator()
+  def __init__(self, features, labels, batch_size, z_dim, learning_rate,
+      num_g_steps, num_d_steps):
+    self.features = features
+    self.labels = labels
+    self.batch_size = batch_size
+    self.z_dim = z_dim
+    self.learning_rate = learning_rate
+    self.num_g_steps = num_g_steps
+    self.num_d_steps = num_d_steps
+    self.num_t_steps = num_g_steps + num_d_steps
+    self.G = Generator()
+    self.D = Discriminator()
 
-  def (self):
+  def input_fn(self):
+    mnist = learn.datasets.load_dataset("mnist")
+    # Returns np.array
+    real_images = mnist.train.images.reshape((55000, 28, 28, 1))
+    real_image = tf.train.slice_input_producer([tf.constant(real_images)])
+    z = tf.random_uniform([self.z_dim], minval=-1, maxval=1)
+
+    min_after_dequeue = 10000
+    capacity = min_after_dequeue + 3 * self.batch_size
+    features = tf.train.batch(
+        { 'real_images': real_image,
+          'z': z},
+        batch_size=self.batch_size,
+        capacity=32)
+
+    # NOTE for some reason there's a need to squeeze here when it shouldn't be
+    # necessary.
+    features['real_images'] = tf.squeeze(features['real_images'], axis=1)
+    labels = None
+    return features, None
+
+  def train(self):
+    dcgan = learn.Estimator(
+        model_fn=self.dcgan_fn,
+        model_dir='/tmp/dcgan_model')
+    tensors_to_log = {'d_loss_fake': 'd_loss_fake'}
+    logging_hook = tf.train.LoggingTensorHook(
+        tensors=tensors_to_log, every_n_iter=1)
+    dcgan.fit(input_fn=self.input_fn, monitors=[logging_hook])
+
+  def dcgan_fn(self, features, labels, mode):
+    global_step_tensor = tf.Variable(0, trainable=False, name='global_step')
+    real_images = features['real_images']
+    z = features['z']
+    sampled_images = self.G.generator_fn(z, None, mode, False)
+    D_logits_real = self.D.discriminator_fn(real_images, None, mode, False)
+    D_logits_fake = self.D.discriminator_fn(sampled_images, None, mode, True)
+
+    g_vars = tf.get_collection(
+        tf.GraphKeys.TRAINABLE_VARIABLES,
+        scope='generator')
+    d_vars = tf.get_collection(
+        tf.GraphKeys.TRAINABLE_VARIABLES,
+        scope='discriminator')
+
+    if mode != learn.ModeKeys.INFER:
+      g_loss = tf.reduce_mean(
+          tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=D_logits_fake,
+            labels=tf.ones_like(D_logits_fake)))
+
+      d_loss_real = tf.reduce_mean(
+          tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=D_logits_real,
+            labels=tf.ones_like(D_logits_real)))
+      d_loss_fake = tf.reduce_mean(
+          tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=D_logits_fake,
+            labels=tf.zeros_like(D_logits_fake)),
+          name='d_loss_fake')
+      d_loss = d_loss_real + d_loss_fake
+
+    if mode == learn.ModeKeys.TRAIN:
+      train_gen = tf.less_equal(tf.mod(global_step_tensor,
+        self.num_t_steps), self.num_g_steps)
+
+      g_optim = tf.train.AdamOptimizer(self.learning_rate).minimize(
+          g_loss,
+          global_step=global_step_tensor,
+          var_list=g_vars)
+      d_optim = tf.train.AdamOptimizer(self.learning_rate).minimize(
+          d_loss,
+          global_step=global_step_tensor,
+          var_list=d_vars)
+
+      def g_optim_fn(): return g_optim
+      def d_optim_fn(): return d_optim
+      def g_loss_fn(): return g_loss
+      def d_loss_fn(): return d_loss
+
+      train_op = tf.cond(train_gen, g_optim_fn, d_optim_fn)
+      loss = tf.cond(train_gen, g_loss_fn, d_loss_fn)
+
+    predictions = {
+        'sampled_images': sampled_images,
+        'probabilities': D_logits_fake
+        }
+
+    return model_fn_lib.ModelFnOps(
+        mode=mode, predictions=predictions, loss=loss, train_op=train_op)
 
 class Generator:
   def __init__(self):
     pass
 
-  def generator_fn(self, features, labels, mode):
-    training = mode == learn.ModeKeys.TRAIN
-    layers = [features]
-    layers.append(tf.layers.dense(layers[-1], 4*4*1024, activation=leaky_relu))
-    layers.append(tf.layers.batch_normalization(layers[-1], training=training))
-    layers.append(tf.reshape(layers[-1], [-1, 4, 4, 1024]))
-    layers.append(tf.layers.conv2d_transpose(
-      inputs=layers[-1],
-      filters=512,
-      kernel_size=[5, 5],
-      strides=[2, 2],
-      padding='valid',
-      activation=leaky_relu))
-    layers.append(tf.layers.batch_normalization(layers[-1], training=training))
-    layers.append(tf.layers.conv2d_transpose(
-      inputs=layers[-1],
-      filters=256,
-      kernel_size=[5, 5],
-      strides=[2, 2],
-      padding='valid',
-      activation=leaky_relu))
-    layers.append(tf.layers.batch_normalization(layers[-1], training=training))
-    layers.append(tf.layers.conv2d_transpose(
-      inputs=layers[-1],
-      filters=128,
-      kernel_size=[5, 5],
-      strides=[2, 2],
-      padding='valid',
-      activation=leaky_relu))
-    layers.append(tf.layers.batch_normalization(layers[-1], training=training))
-    layers.append(tf.layers.conv2d_transpose(
-      inputs=layers[-1],
-      filters=3,
-      kernel_size=[5, 5],
-      strides=[2, 2],
-      padding='valid',
-      activation=tf.nn.tanh))
-    return layers[-1]
+  def generator_fn(self, features, labels, mode, reuse):
+    with tf.variable_scope('generator', reuse=reuse):
+      training = mode == learn.ModeKeys.TRAIN
+      layers = [features]
+      layers.append(tf.layers.dense(layers[-1], 4*4*1024, activation=leaky_relu))
+      layers.append(tf.layers.batch_normalization(layers[-1], training=training))
+      layers.append(tf.reshape(layers[-1], [-1, 4, 4, 1024]))
+      layers.append(tf.layers.conv2d_transpose(
+        inputs=layers[-1],
+        filters=512,
+        kernel_size=[5, 5],
+        strides=[2, 2],
+        padding='same',
+        activation=leaky_relu))
+      layers.append(tf.layers.batch_normalization(layers[-1], training=training))
+      layers.append(tf.layers.conv2d_transpose(
+        inputs=layers[-1],
+        filters=256,
+        kernel_size=[5, 5],
+        strides=[2, 2],
+        padding='same',
+        activation=leaky_relu))
+      layers.append(tf.layers.batch_normalization(layers[-1], training=training))
+      # layers.append(tf.layers.conv2d_transpose(
+      #   inputs=layers[-1],
+      #   filters=128,
+      #   kernel_size=[5, 5],
+      #   strides=[2, 2],
+      #   padding='same',
+      #   activation=leaky_relu))
+      # layers.append(tf.layers.batch_normalization(layers[-1], training=training))
+      layers.append(tf.layers.conv2d_transpose(
+        inputs=layers[-1],
+        filters=1,
+        kernel_size=[5, 5],
+        strides=[2, 2],
+        padding='same',
+        activation=tf.nn.tanh))
+      return layers[-1]
 
 class Discriminator:
   def __init__(self):
     pass
 
-  def discriminator_fn(features, labels, mode):
-    training = mode == learn.ModeKeys.TRAIN
-    layers = [features]
-    layers.append(tf.layers.conv2d(
-      layers[-1],
-      filters=64,
-      kernel_size=[5, 5],
-      strides=[2, 2],
-      padding='valid',
-      activation=leaky_relu))
-    layers.append(tf.layers.batch_normalization(layers[-1], training=training))
-    layers.append(tf.layers.conv2d(
-      layers[-1],
-      filters=128,
-      kernel_size=[5, 5],
-      strides=[2, 2],
-      padding='valid',
-      activation=leaky_relu))
-    layers.append(tf.layers.batch_normalization(layers[-1], training=training))
-    layers.append(tf.layers.conv2d(
-      layers[-1],
-      filters=256,
-      kernel_size=[5, 5],
-      strides=[2, 2],
-      padding='valid',
-      activation=leaky_relu))
-    layers.append(tf.layers.batch_normalization(layers[-1], training=training))
-    layers.append(tf.layers.conv2d(
-      layers[-1],
-      filters=512,
-      kernel_size=[5, 5],
-      strides=[2, 2],
-      padding='valid',
-      activation=leaky_relu))
-    layers.append(tf.layers.batch_normalization(layers[-1], training=training))
-    layers.append(tf.layers.dense(layers[-1], 1, activation=tf.nn.sigmoid))
-    return layers[-1]
+  def discriminator_fn(self, features, labels, mode, reuse):
+    with tf.variable_scope('discriminator', reuse=reuse):
+      training = mode == learn.ModeKeys.TRAIN
+      layers = [features]
+      layers.append(tf.layers.conv2d(
+        layers[-1],
+        filters=64,
+        kernel_size=[5, 5],
+        strides=[2, 2],
+        padding='same',
+        activation=leaky_relu))
+      layers.append(tf.layers.batch_normalization(layers[-1], training=training))
+      layers.append(tf.layers.conv2d(
+        layers[-1],
+        filters=128,
+        kernel_size=[5, 5],
+        strides=[2, 2],
+        padding='same',
+        activation=leaky_relu))
+      layers.append(tf.layers.batch_normalization(layers[-1], training=training))
+      layers.append(tf.layers.conv2d(
+        layers[-1],
+        filters=256,
+        kernel_size=[5, 5],
+        strides=[2, 2],
+        padding='same',
+        activation=leaky_relu))
+      layers.append(tf.layers.batch_normalization(layers[-1], training=training))
+      # layers.append(tf.layers.conv2d(
+      #   layers[-1],
+      #   filters=512,
+      #   kernel_size=[5, 5],
+      #   strides=[2, 2],
+      #   padding='same',
+      #   activation=leaky_relu))
+      # layers.append(tf.layers.batch_normalization(layers[-1], training=training))
+
+      # Note that this is explicitly None because
+      # tf.nn.sigmoid.cross_entropy_with_logits is used in the train step.
+      layers.append(tf.layers.dense(layers[-1], 1, activation=None))
+      return layers[-1]
 
 class Input:
   # mean and stddev computed included data from test set, for convenience
@@ -136,7 +237,7 @@ class Input:
     return image
 
   def input_fn(self, image_names, num_epochs):
-    filename_queue = tf.train.slice(
+    filename_queue = tf.train.string_input_producer(
         [image_names],
         num_epochs=num_epochs,
         shuffle=True)
@@ -154,9 +255,19 @@ class Input:
 
 
 def main():
-  obj = Preprocess('/media/jkschin/WD2TB/data/CelebA/img_align_celeba_64x64/',
-      (64, 64, 3))
-  obj.get_mean()
+  features = None
+  labels = None
+  batch_size = 1
+  z_dim = 100
+  learning_rate = 0.01
+  num_g_steps = 1
+  num_d_steps = 1
+  dcgan = DCGAN(features, labels, batch_size, z_dim, learning_rate,
+      num_g_steps, num_d_steps)
+  dcgan.train()
+  # obj = Preprocess('/media/jkschin/WD2TB/data/CelebA/img_align_celeba_64x64/',
+  #     (64, 64, 3))
+  # obj.get_mean()
 
 
 if __name__ == '__main__':
