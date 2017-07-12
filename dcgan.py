@@ -5,6 +5,8 @@ import tensorflow as tf
 from tensorflow.contrib import learn
 from tensorflow.contrib.learn.python.learn.estimators import model_fn as model_fn_lib
 
+tf.logging.set_verbosity(tf.logging.INFO)
+
 # TODO: efficient mean and variance functions
 
 def leaky_relu(x):
@@ -46,77 +48,81 @@ class DCGAN:
     # necessary.
     features['real_images'] = tf.squeeze(features['real_images'], axis=1)
     labels = None
-    return features, None
+    return features, labels
 
   def train(self):
-    dcgan = learn.Estimator(
-        model_fn=self.dcgan_fn,
+    def dcgan_fn(features, labels, mode):
+      global_step_tensor = tf.Variable(0, trainable=False, name='global_step')
+      real_images = features['real_images']
+      z = features['z']
+      sampled_images = self.G.generator_fn(z, None, mode, False)
+      D_logits_real = self.D.discriminator_fn(real_images, None, mode, False)
+      D_logits_fake = self.D.discriminator_fn(sampled_images, None, mode, True)
+
+      g_vars = tf.get_collection(
+          tf.GraphKeys.TRAINABLE_VARIABLES,
+          scope='generator')
+      d_vars = tf.get_collection(
+          tf.GraphKeys.TRAINABLE_VARIABLES,
+          scope='discriminator')
+
+      if mode != tf.estimator.ModeKeys.PREDICT:
+        g_loss = tf.reduce_mean(
+            tf.nn.sigmoid_cross_entropy_with_logits(
+              logits=D_logits_fake,
+              labels=tf.ones_like(D_logits_fake)))
+
+        d_loss_real = tf.reduce_mean(
+            tf.nn.sigmoid_cross_entropy_with_logits(
+              logits=D_logits_real,
+              labels=tf.ones_like(D_logits_real)))
+        d_loss_fake = tf.reduce_mean(
+            tf.nn.sigmoid_cross_entropy_with_logits(
+              logits=D_logits_fake,
+              labels=tf.zeros_like(D_logits_fake)),
+            name='d_loss_fake')
+        d_loss = d_loss_real + d_loss_fake
+
+      if mode == tf.estimator.ModeKeys.TRAIN:
+        train_gen = tf.less_equal(tf.mod(global_step_tensor,
+          self.num_t_steps), self.num_g_steps)
+
+        g_optim = tf.train.AdamOptimizer(self.learning_rate).minimize(
+            g_loss,
+            global_step=global_step_tensor,
+            var_list=g_vars)
+        d_optim = tf.train.AdamOptimizer(self.learning_rate).minimize(
+            d_loss,
+            global_step=global_step_tensor,
+            var_list=d_vars)
+
+        def g_optim_fn(): return g_optim
+        def d_optim_fn(): return d_optim
+        def g_loss_fn(): return g_loss
+        def d_loss_fn(): return d_loss
+
+        # train_op = tf.cond(train_gen, g_optim_fn, d_optim_fn)
+        # loss = tf.cond(train_gen, g_loss_fn, d_loss_fn)
+
+        train_op = d_optim
+        loss = d_loss
+
+      predictions = {
+          'sampled_images': sampled_images,
+          'probabilities': D_logits_fake
+          }
+
+      return tf.estimator.EstimatorSpec(
+          mode=mode, predictions=predictions, loss=loss, train_op=train_op)
+    dcgan = tf.estimator.Estimator(
+        model_fn=dcgan_fn,
         model_dir='/tmp/dcgan_model')
-    tensors_to_log = {'d_loss_fake': 'd_loss_fake'}
+    tensors_to_log = {'d_loss_fake': 'd_loss_fake',
+                      'global_step': 'global_step'}
     logging_hook = tf.train.LoggingTensorHook(
-        tensors=tensors_to_log, every_n_iter=1)
-    dcgan.fit(input_fn=self.input_fn, monitors=[logging_hook])
+        tensors=tensors_to_log, every_n_secs=1)
+    dcgan.train(input_fn=self.input_fn, hooks=[logging_hook])
 
-  def dcgan_fn(self, features, labels, mode):
-    global_step_tensor = tf.Variable(0, trainable=False, name='global_step')
-    real_images = features['real_images']
-    z = features['z']
-    sampled_images = self.G.generator_fn(z, None, mode, False)
-    D_logits_real = self.D.discriminator_fn(real_images, None, mode, False)
-    D_logits_fake = self.D.discriminator_fn(sampled_images, None, mode, True)
-
-    g_vars = tf.get_collection(
-        tf.GraphKeys.TRAINABLE_VARIABLES,
-        scope='generator')
-    d_vars = tf.get_collection(
-        tf.GraphKeys.TRAINABLE_VARIABLES,
-        scope='discriminator')
-
-    if mode != learn.ModeKeys.INFER:
-      g_loss = tf.reduce_mean(
-          tf.nn.sigmoid_cross_entropy_with_logits(
-            logits=D_logits_fake,
-            labels=tf.ones_like(D_logits_fake)))
-
-      d_loss_real = tf.reduce_mean(
-          tf.nn.sigmoid_cross_entropy_with_logits(
-            logits=D_logits_real,
-            labels=tf.ones_like(D_logits_real)))
-      d_loss_fake = tf.reduce_mean(
-          tf.nn.sigmoid_cross_entropy_with_logits(
-            logits=D_logits_fake,
-            labels=tf.zeros_like(D_logits_fake)),
-          name='d_loss_fake')
-      d_loss = d_loss_real + d_loss_fake
-
-    if mode == learn.ModeKeys.TRAIN:
-      train_gen = tf.less_equal(tf.mod(global_step_tensor,
-        self.num_t_steps), self.num_g_steps)
-
-      g_optim = tf.train.AdamOptimizer(self.learning_rate).minimize(
-          g_loss,
-          global_step=global_step_tensor,
-          var_list=g_vars)
-      d_optim = tf.train.AdamOptimizer(self.learning_rate).minimize(
-          d_loss,
-          global_step=global_step_tensor,
-          var_list=d_vars)
-
-      def g_optim_fn(): return g_optim
-      def d_optim_fn(): return d_optim
-      def g_loss_fn(): return g_loss
-      def d_loss_fn(): return d_loss
-
-      train_op = tf.cond(train_gen, g_optim_fn, d_optim_fn)
-      loss = tf.cond(train_gen, g_loss_fn, d_loss_fn)
-
-    predictions = {
-        'sampled_images': sampled_images,
-        'probabilities': D_logits_fake
-        }
-
-    return model_fn_lib.ModelFnOps(
-        mode=mode, predictions=predictions, loss=loss, train_op=train_op)
 
 class Generator:
   def __init__(self):
@@ -124,7 +130,7 @@ class Generator:
 
   def generator_fn(self, features, labels, mode, reuse):
     with tf.variable_scope('generator', reuse=reuse):
-      training = mode == learn.ModeKeys.TRAIN
+      training = mode == tf.estimator.ModeKeys.TRAIN
       layers = [features]
       layers.append(tf.layers.dense(layers[-1], 4*4*1024, activation=leaky_relu))
       layers.append(tf.layers.batch_normalization(layers[-1], training=training))
@@ -168,7 +174,7 @@ class Discriminator:
 
   def discriminator_fn(self, features, labels, mode, reuse):
     with tf.variable_scope('discriminator', reuse=reuse):
-      training = mode == learn.ModeKeys.TRAIN
+      training = mode == tf.estimator.ModeKeys.TRAIN
       layers = [features]
       layers.append(tf.layers.conv2d(
         layers[-1],
