@@ -3,7 +3,6 @@ import numpy as np
 import os
 import tensorflow as tf
 from tensorflow.contrib import learn
-from tensorflow.contrib.learn.python.learn.estimators import model_fn as model_fn_lib
 
 tf.logging.set_verbosity(tf.logging.INFO)
 
@@ -59,6 +58,10 @@ class DCGAN:
       sampled_images = self.G.generator_fn(z, None, mode, False)
       D_logits_real = self.D.discriminator_fn(real_images, None, mode, False)
       D_logits_fake = self.D.discriminator_fn(sampled_images, None, mode, True)
+      print D_logits_real
+      print D_logits_fake
+      tf.identity(D_logits_real, name='d_logits_real')
+      tf.identity(D_logits_fake, name='d_logits_fake')
 
       g_vars = tf.get_collection(
           tf.GraphKeys.TRAINABLE_VARIABLES,
@@ -71,37 +74,35 @@ class DCGAN:
         g_loss = tf.reduce_mean(
             tf.nn.sigmoid_cross_entropy_with_logits(
               logits=D_logits_fake,
-              labels=tf.ones_like(D_logits_fake)))
-
+              labels=tf.ones_like(D_logits_fake)),
+            name='g_loss')
         d_loss_real = tf.reduce_mean(
             tf.nn.sigmoid_cross_entropy_with_logits(
               logits=D_logits_real,
               labels=tf.ones_like(D_logits_real)),
-              name='d_loss_real')
+            name='d_loss_real')
         d_loss_fake = tf.reduce_mean(
             tf.nn.sigmoid_cross_entropy_with_logits(
               logits=D_logits_fake,
               labels=tf.zeros_like(D_logits_fake)),
-              name='d_loss_fake')
+            name='d_loss_fake')
         d_loss = d_loss_real + d_loss_fake
 
       if mode == tf.estimator.ModeKeys.TRAIN:
         mod = tf.mod(global_step_tensor, self.num_t_steps, name='mod')
         train_gen = tf.less(mod, self.num_g_steps, name='train_gen')
-
         g_optim = tf.train.AdamOptimizer(self.learning_rate).minimize(
             g_loss,
             var_list=g_vars)
         d_optim = tf.train.AdamOptimizer(self.learning_rate).minimize(
             d_loss,
             var_list=d_vars)
-
         optim_op = tf.cond(train_gen, lambda: g_optim, lambda: d_optim,
             name='optim_op')
         loss = tf.cond(train_gen, lambda: g_loss, lambda: d_loss, name='loss')
-        with tf.control_dependencies([mod]):
+        with tf.control_dependencies([mod, optim_op]):
           global_inc_op = tf.assign_add(global_step_tensor, 1, use_locking=True)
-          train_op = tf.group(optim_op, global_inc_op)
+        train_op = tf.group(optim_op, global_inc_op)
 
       predictions = {
           'sampled_images': sampled_images,
@@ -110,14 +111,21 @@ class DCGAN:
 
       return tf.estimator.EstimatorSpec(
           mode=mode, predictions=predictions, loss=loss, train_op=train_op)
+    config = tf.estimator.RunConfig()
+    config._model_dir = '/tmp/dcgan_model'
+    config._save_summary_steps = 1
+    config._save_checkpoints_secs = None
+    config._save_checkpoints_steps = 100
     dcgan = tf.estimator.Estimator(
         model_fn=dcgan_fn,
-        model_dir='/tmp/dcgan_model')
-    tensors_to_log = {'d_loss_fake': 'd_loss_fake',
+        config=config)
+    tensors_to_log = {'d_logits_fake': 'd_logits_fake',
+                      'd_logits_real': 'd_logits_real',
+                      'g_loss': 'g_loss',
+                      'd_loss_fake': 'd_loss_fake',
                       'd_loss_real': 'd_loss_real',
                       'train_gen': 'train_gen',
                       'mod': 'mod',
-                      # 'loss': 'loss',
                       'global_step': 'global_step_tensor'}
     logging_hook = tf.train.LoggingTensorHook(
         tensors=tensors_to_log, every_n_iter=1)
@@ -211,7 +219,10 @@ class Discriminator:
 
       # Note that this is explicitly None because
       # tf.nn.sigmoid.cross_entropy_with_logits is used in the train step.
+      layers.append(tf.reshape(layers[-1], [-1, 4*4*256]))
       layers.append(tf.layers.dense(layers[-1], 1, activation=None))
+      for l in layers:
+        print l
       return layers[-1]
 
 class Input:
@@ -263,7 +274,7 @@ class Input:
 def main():
   features = None
   labels = None
-  batch_size = 1
+  batch_size = 100
   z_dim = 100
   learning_rate = 0.01
   num_g_steps = 1
