@@ -202,7 +202,7 @@ class Discriminator:
 
       # Note that this is explicitly None because
       # tf.nn.sigmoid.cross_entropy_with_logits is used in the train step.
-      layers.append(tf.reshape(layers[-1], [-1, 4*4*256]))
+      layers.append(tf.reshape(layers[-1], [-1, 7*7*256]))
       layers.append(tf.layers.dense(layers[-1], 1, activation=tf.nn.elu))
       layers.append(tf.layers.batch_normalization(layers[-1], training=training))
       for l in layers:
