@@ -52,7 +52,8 @@ class DCGAN:
 
   def train(self):
     def dcgan_fn(features, labels, mode):
-      global_step_tensor = tf.Variable(0, trainable=False, name='global_step')
+      global_step_tensor = tf.Variable(0, trainable=False, dtype=tf.int64,
+          name='global_step_tensor')
       real_images = features['real_images']
       z = features['z']
       sampled_images = self.G.generator_fn(z, None, mode, False)
@@ -85,25 +86,22 @@ class DCGAN:
         d_loss = d_loss_real + d_loss_fake
 
       if mode == tf.estimator.ModeKeys.TRAIN:
-        train_gen = tf.less_equal(tf.mod(global_step_tensor,
-          self.num_t_steps), self.num_g_steps)
+        mod = tf.mod(global_step_tensor, self.num_t_steps, name='mod')
+        train_gen = tf.less(mod, self.num_g_steps, name='train_gen')
 
         g_optim = tf.train.AdamOptimizer(self.learning_rate).minimize(
             g_loss,
-            global_step=global_step_tensor,
             var_list=g_vars)
         d_optim = tf.train.AdamOptimizer(self.learning_rate).minimize(
             d_loss,
-            global_step=global_step_tensor,
             var_list=d_vars)
 
-        def g_optim_fn(): return g_optim
-        def d_optim_fn(): return d_optim
-        def g_loss_fn(): return g_loss
-        def d_loss_fn(): return d_loss
-
-        train_op = tf.cond(train_gen, g_optim_fn, d_optim_fn)
-        loss = tf.cond(train_gen, g_loss_fn, d_loss_fn)
+        optim_op = tf.cond(train_gen, lambda: g_optim, lambda: d_optim,
+            name='optim_op')
+        loss = tf.cond(train_gen, lambda: g_loss, lambda: d_loss, name='loss')
+        with tf.control_dependencies([mod]):
+          global_inc_op = tf.assign_add(global_step_tensor, 1, use_locking=True)
+          train_op = tf.group(optim_op, global_inc_op)
 
       predictions = {
           'sampled_images': sampled_images,
@@ -117,9 +115,12 @@ class DCGAN:
         model_dir='/tmp/dcgan_model')
     tensors_to_log = {'d_loss_fake': 'd_loss_fake',
                       'd_loss_real': 'd_loss_real',
-                      'global_step': 'global_step'}
+                      'train_gen': 'train_gen',
+                      'mod': 'mod',
+                      # 'loss': 'loss',
+                      'global_step': 'global_step_tensor'}
     logging_hook = tf.train.LoggingTensorHook(
-        tensors=tensors_to_log, every_n_iter=10)
+        tensors=tensors_to_log, every_n_iter=1)
     dcgan.train(input_fn=self.input_fn, hooks=[logging_hook])
 
 
@@ -262,7 +263,7 @@ class Input:
 def main():
   features = None
   labels = None
-  batch_size = 100
+  batch_size = 1
   z_dim = 100
   learning_rate = 0.01
   num_g_steps = 1
