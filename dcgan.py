@@ -2,7 +2,9 @@
 import numpy as np
 import os
 import tensorflow as tf
+
 from tensorflow.contrib import learn
+from tensorflow.python.training import training_util
 
 tf.logging.set_verbosity(tf.logging.INFO)
 
@@ -51,15 +53,13 @@ class DCGAN:
 
   def train(self):
     def dcgan_fn(features, labels, mode):
-      global_step_tensor = tf.Variable(0, trainable=False, dtype=tf.int64,
-          name='global_step_tensor')
+      global_step = training_util.get_global_step()
       real_images = features['real_images']
       z = features['z']
       sampled_images = self.G.generator_fn(z, None, mode, False)
+      tf.summary.image('sampled_images', sampled_images, 10)
       D_logits_real = self.D.discriminator_fn(real_images, None, mode, False)
       D_logits_fake = self.D.discriminator_fn(sampled_images, None, mode, True)
-      print D_logits_real
-      print D_logits_fake
       tf.identity(D_logits_real, name='d_logits_real')
       tf.identity(D_logits_fake, name='d_logits_fake')
 
@@ -89,7 +89,7 @@ class DCGAN:
         d_loss = d_loss_real + d_loss_fake
 
       if mode == tf.estimator.ModeKeys.TRAIN:
-        mod = tf.mod(global_step_tensor, self.num_t_steps, name='mod')
+        mod = tf.mod(global_step, self.num_t_steps, name='mod')
         train_gen = tf.less(mod, self.num_g_steps, name='train_gen')
         g_optim = tf.train.AdamOptimizer(self.learning_rate).minimize(
             g_loss,
@@ -101,7 +101,7 @@ class DCGAN:
             name='optim_op')
         loss = tf.cond(train_gen, lambda: g_loss, lambda: d_loss, name='loss')
         with tf.control_dependencies([mod, optim_op]):
-          global_inc_op = tf.assign_add(global_step_tensor, 1, use_locking=True)
+          global_inc_op = tf.assign_add(global_step, 1, use_locking=True)
         train_op = tf.group(optim_op, global_inc_op)
 
       predictions = {
@@ -119,14 +119,14 @@ class DCGAN:
     dcgan = tf.estimator.Estimator(
         model_fn=dcgan_fn,
         config=config)
-    tensors_to_log = {'d_logits_fake': 'd_logits_fake',
-                      'd_logits_real': 'd_logits_real',
+    tensors_to_log = {#'d_logits_fake': 'd_logits_fake',
+                      #'d_logits_real': 'd_logits_real',
                       'g_loss': 'g_loss',
                       'd_loss_fake': 'd_loss_fake',
                       'd_loss_real': 'd_loss_real',
                       'train_gen': 'train_gen',
                       'mod': 'mod',
-                      'global_step': 'global_step_tensor'}
+                      'global_step': 'global_step'}
     logging_hook = tf.train.LoggingTensorHook(
         tensors=tensors_to_log, every_n_iter=1)
     dcgan.train(input_fn=self.input_fn, hooks=[logging_hook])
@@ -221,8 +221,6 @@ class Discriminator:
       # tf.nn.sigmoid.cross_entropy_with_logits is used in the train step.
       layers.append(tf.reshape(layers[-1], [-1, 4*4*256]))
       layers.append(tf.layers.dense(layers[-1], 1, activation=None))
-      for l in layers:
-        print l
       return layers[-1]
 
 class Input:
@@ -274,11 +272,11 @@ class Input:
 def main():
   features = None
   labels = None
-  batch_size = 100
+  batch_size = 1
   z_dim = 100
   learning_rate = 0.01
   num_g_steps = 1
-  num_d_steps = 5
+  num_d_steps = 2
   dcgan = DCGAN(features, labels, batch_size, z_dim, learning_rate,
       num_g_steps, num_d_steps)
   dcgan.train()
