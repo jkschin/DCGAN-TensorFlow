@@ -35,19 +35,19 @@ class DCGAN:
     # Returns np.array
     real_images = mnist.train.images.reshape((55000, 28, 28, 1))
     real_image = tf.train.slice_input_producer([tf.constant(real_images)])
-    z = tf.random_uniform([self.z_dim], minval=-1, maxval=1)
 
     min_after_dequeue = 10000
     capacity = min_after_dequeue + 3 * self.batch_size
-    features = tf.train.batch(
-        { 'real_images': real_image,
-          'z': z},
+    real_images = tf.train.batch(
+        real_image,
         batch_size=self.batch_size,
         capacity=32)
-
+    zs = tf.random_uniform([self.batch_size, self.z_dim])
     # NOTE for some reason there's a need to squeeze here when it shouldn't be
     # necessary.
-    features['real_images'] = tf.squeeze(features['real_images'], axis=1)
+    features = {
+        'real_images': real_images,
+        'zs': zs}
     labels = None
     return features, labels
 
@@ -55,7 +55,7 @@ class DCGAN:
     def dcgan_fn(features, labels, mode):
       global_step = training_util.get_global_step()
       real_images = features['real_images']
-      z = features['z']
+      z = features['zs']
       sampled_images = self.G.generator_fn(z, None, mode, False)
       tf.summary.image('sampled_images', sampled_images, 10)
       D_logits_real = self.D.discriminator_fn(real_images, None, mode, False)
