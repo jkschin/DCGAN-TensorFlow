@@ -17,32 +17,24 @@ def leaky_relu(x):
     return x
 
 class DCGAN:
-  def __init__(self, features, labels, batch_size, z_dim, learning_rate,
-      num_g_steps, num_d_steps):
-    self.features = features
-    self.labels = labels
-    self.batch_size = batch_size
-    self.z_dim = z_dim
-    self.learning_rate = learning_rate
-    self.num_g_steps = num_g_steps
-    self.num_d_steps = num_d_steps
-    self.num_t_steps = num_g_steps + num_d_steps
+  def __init__(self, params):
+    self.params = params
     self.G = Generator()
     self.D = Discriminator()
 
-  def input_fn(self):
+  def input_fn(self, params):
     mnist = learn.datasets.load_dataset("mnist")
     # Returns np.array
     real_images = mnist.train.images.reshape((55000, 28, 28, 1))
     real_image = tf.train.slice_input_producer([tf.constant(real_images)])
 
     min_after_dequeue = 10000
-    capacity = min_after_dequeue + 3 * self.batch_size
+    capacity = min_after_dequeue + 3 * params['batch_size']
     real_images = tf.train.batch(
         real_image,
-        batch_size=self.batch_size,
+        batch_size=params['batch_size'],
         capacity=32)
-    zs = tf.random_uniform([self.batch_size, self.z_dim])
+    zs = tf.random_uniform((params['batch_size'], params['z_dim']))
     # NOTE for some reason there's a need to squeeze here when it shouldn't be
     # necessary.
     features = {
@@ -52,12 +44,11 @@ class DCGAN:
     return features, labels
 
   def train(self):
-    def dcgan_fn(features, labels, mode):
+    def dcgan_fn(features, labels, mode, params):
       global_step = training_util.get_global_step()
       real_images = features['real_images']
-      z = features['zs']
-      sampled_images = self.G.generator_fn(z, None, mode, False)
-      tf.summary.image('sampled_images', sampled_images, 10)
+      zs = features['zs']
+      sampled_images = self.G.generator_fn(zs, None, mode, False)
       D_logits_real = self.D.discriminator_fn(real_images, None, mode, False)
       D_logits_fake = self.D.discriminator_fn(sampled_images, None, mode, True)
       tf.identity(D_logits_real, name='d_logits_real')
@@ -89,12 +80,12 @@ class DCGAN:
         d_loss = d_loss_real + d_loss_fake
 
       if mode == tf.estimator.ModeKeys.TRAIN:
-        mod = tf.mod(global_step, self.num_t_steps, name='mod')
-        train_gen = tf.less(mod, self.num_g_steps, name='train_gen')
-        g_optim = tf.train.AdamOptimizer(self.learning_rate).minimize(
+        mod = tf.mod(global_step, params['num_t_steps'], name='mod')
+        train_gen = tf.less(mod, params['num_g_steps'], name='train_gen')
+        g_optim = tf.train.AdamOptimizer(params['learning_rate']).minimize(
             g_loss,
             var_list=g_vars)
-        d_optim = tf.train.AdamOptimizer(self.learning_rate).minimize(
+        d_optim = tf.train.AdamOptimizer(params['learning_rate']).minimize(
             d_loss,
             var_list=d_vars)
         optim_op = tf.cond(train_gen, lambda: g_optim, lambda: d_optim,
@@ -103,6 +94,13 @@ class DCGAN:
         with tf.control_dependencies([mod, optim_op]):
           global_inc_op = tf.assign_add(global_step, 1, use_locking=True)
         train_op = tf.group(optim_op, global_inc_op)
+
+      tf.summary.tensor_summary('zs', zs)
+      tf.summary.image('real_images', real_images, max_outputs=10)
+      tf.summary.image('sampled_images', sampled_images, max_outputs=10)
+      tf.summary.scalar('g_loss', g_loss)
+      tf.summary.scalar('d_loss_real', d_loss_real)
+      tf.summary.scalar('d_loss_fake', d_loss_fake)
 
       predictions = {
           'sampled_images': sampled_images,
@@ -113,12 +111,13 @@ class DCGAN:
           mode=mode, predictions=predictions, loss=loss, train_op=train_op)
     config = tf.estimator.RunConfig()
     config._model_dir = '/tmp/dcgan_model'
-    config._save_summary_steps = 1
+    config._save_summary_steps = 10
     config._save_checkpoints_secs = None
     config._save_checkpoints_steps = 100
     dcgan = tf.estimator.Estimator(
         model_fn=dcgan_fn,
-        config=config)
+        config=config,
+        params=self.params)
     tensors_to_log = {#'d_logits_fake': 'd_logits_fake',
                       #'d_logits_real': 'd_logits_real',
                       'g_loss': 'g_loss',
@@ -129,7 +128,8 @@ class DCGAN:
                       'global_step': 'global_step'}
     logging_hook = tf.train.LoggingTensorHook(
         tensors=tensors_to_log, every_n_iter=1)
-    dcgan.train(input_fn=self.input_fn, hooks=[logging_hook])
+    dcgan.train(input_fn=lambda: self.input_fn(self.params),
+        hooks=[logging_hook])
 
 
 class Generator:
@@ -223,6 +223,17 @@ class Discriminator:
       layers.append(tf.layers.dense(layers[-1], 1, activation=None))
       return layers[-1]
 
+def main():
+  params = {
+      'batch_size' : 1,
+      'z_dim' : 100,
+      'learning_rate' : 0.01,
+      'num_g_steps' : 1,
+      'num_d_steps' : 2,
+      'num_t_steps' : 3}
+  dcgan = DCGAN(params)
+  dcgan.train()
+
 class Input:
   # mean and stddev computed included data from test set, for convenience
   # BGR Mean [  88.26726517  103.51948437  133.39556285]
@@ -269,17 +280,6 @@ class Input:
     return images, None
 
 
-def main():
-  features = None
-  labels = None
-  batch_size = 1
-  z_dim = 100
-  learning_rate = 0.01
-  num_g_steps = 1
-  num_d_steps = 2
-  dcgan = DCGAN(features, labels, batch_size, z_dim, learning_rate,
-      num_g_steps, num_d_steps)
-  dcgan.train()
   # obj = Preprocess('/media/jkschin/WD2TB/data/CelebA/img_align_celeba_64x64/',
   #     (64, 64, 3))
   # obj.get_mean()
