@@ -10,11 +10,12 @@ tf.logging.set_verbosity(tf.logging.INFO)
 
 # TODO: efficient mean and variance functions
 
-def leaky_relu(x):
-    negative_part = tf.nn.relu(-x)
-    x = tf.nn.relu(x)
-    x -= tf.constant(0.01, tf.float32) * negative_part
-    return x
+# def leaky_relu(x):
+#   return tf.contrib.keras.layers.LeakyReLU(x)
+    # negative_part = tf.nn.relu(-x)
+    # x = tf.nn.relu(x)
+    # x -= tf.constant(0.20, tf.float32) * negative_part # changed slope here
+    # return x
 
 class DCGAN:
   def __init__(self, params):
@@ -24,8 +25,9 @@ class DCGAN:
 
   def input_fn(self, params):
     mnist = learn.datasets.load_dataset("mnist")
-    # Returns np.array
+    # Returns np.array, range [0, 1.0]
     real_images = mnist.train.images.reshape((55000, 28, 28, 1))
+    real_images = (real_images - 0.5) * 2
     real_image = tf.train.slice_input_producer([tf.constant(real_images)])
 
     min_after_dequeue = 10000
@@ -34,7 +36,7 @@ class DCGAN:
         real_image,
         batch_size=params['batch_size'],
         capacity=32)
-    zs = tf.random_uniform((params['batch_size'], params['z_dim']))
+    zs = tf.random_normal((params['batch_size'], params['z_dim']))
     # NOTE for some reason there's a need to squeeze here when it shouldn't be
     # necessary.
     features = {
@@ -49,6 +51,7 @@ class DCGAN:
       real_images = features['real_images']
       zs = features['zs']
       sampled_images = self.G.generator_fn(zs, None, mode, False)
+      assert real_images.shape == sampled_images.shape
       D_logits_real = self.D.discriminator_fn(real_images, None, mode, False)
       D_logits_fake = self.D.discriminator_fn(sampled_images, None, mode, True)
       tf.identity(D_logits_real, name='d_logits_real')
@@ -61,33 +64,35 @@ class DCGAN:
           tf.GraphKeys.TRAINABLE_VARIABLES,
           scope='discriminator')
 
+      # label smoothing used from Salimans et al. 2016
       if mode != tf.estimator.ModeKeys.PREDICT:
         g_loss = tf.reduce_mean(
             tf.nn.sigmoid_cross_entropy_with_logits(
               logits=D_logits_fake,
-              labels=tf.ones_like(D_logits_fake)),
+              labels=tf.random_uniform(tf.shape(D_logits_fake), 0.7, 1.2)),
             name='g_loss')
         d_loss_real = tf.reduce_mean(
             tf.nn.sigmoid_cross_entropy_with_logits(
               logits=D_logits_real,
-              labels=tf.ones_like(D_logits_real)),
+              labels=tf.random_uniform(tf.shape(D_logits_real), 0.7, 1.2)),
             name='d_loss_real')
         d_loss_fake = tf.reduce_mean(
             tf.nn.sigmoid_cross_entropy_with_logits(
               logits=D_logits_fake,
-              labels=tf.zeros_like(D_logits_fake)),
+              labels=tf.random_uniform(tf.shape(D_logits_fake), 0.0, 0.3)),
             name='d_loss_fake')
-        d_loss = d_loss_real + d_loss_fake
+        # hack to select only all real or all generated to optimize D
+        sel = tf.random_uniform([1], 0, 1)[0]
+        d_loss = tf.cond(tf.less_equal(sel, 0.5), lambda: d_loss_real, lambda:
+            d_loss_fake)
 
       if mode == tf.estimator.ModeKeys.TRAIN:
         mod = tf.mod(global_step, params['num_t_steps'], name='mod')
         train_gen = tf.less(mod, params['num_g_steps'], name='train_gen')
-        g_optim = tf.train.AdamOptimizer(params['learning_rate']).minimize(
-            g_loss,
-            var_list=g_vars)
-        d_optim = tf.train.AdamOptimizer(params['learning_rate']).minimize(
-            d_loss,
-            var_list=d_vars)
+        g_optim = tf.train.AdamOptimizer(
+            params['learning_rate']).minimize(g_loss, var_list=g_vars)
+        d_optim = tf.train.AdamOptimizer(
+            params['learning_rate']).minimize(d_loss, var_list=d_vars)
         optim_op = tf.cond(train_gen, lambda: g_optim, lambda: d_optim,
             name='optim_op')
         loss = tf.cond(train_gen, lambda: g_loss, lambda: d_loss, name='loss')
@@ -95,9 +100,10 @@ class DCGAN:
           global_inc_op = tf.assign_add(global_step, 1, use_locking=True)
         train_op = tf.group(optim_op, global_inc_op)
 
-      tf.summary.tensor_summary('zs', zs)
+      summary_zs = tf.reshape(zs, (params['batch_size'], 5, 5, 1))
       tf.summary.image('real_images', real_images, max_outputs=10)
       tf.summary.image('sampled_images', sampled_images, max_outputs=10)
+      tf.summary.image('zs', summary_zs, max_outputs=10)
       tf.summary.scalar('g_loss', g_loss)
       tf.summary.scalar('d_loss_real', d_loss_real)
       tf.summary.scalar('d_loss_fake', d_loss_fake)
@@ -136,98 +142,78 @@ class Generator:
   def __init__(self):
     pass
 
+  def deconv_bn_nonlinearity(self, inputs, filters, kernel_size, strides,
+      padding, activation, training):
+    conv = tf.layers.conv2d_transpose(
+        inputs=inputs,
+        filters=filters,
+        kernel_size=kernel_size,
+        strides=strides,
+        padding=padding,
+        activation=None,
+        kernel_regularizer=tf.contrib.layers.l2_regularizer(1.0),
+        bias_regularizer=tf.contrib.layers.l2_regularizer(1.0))
+    bn = tf.layers.batch_normalization(conv, training=training)
+    a = activation(bn)
+    return a
+
   def generator_fn(self, features, labels, mode, reuse):
     with tf.variable_scope('generator', reuse=reuse):
       training = mode == tf.estimator.ModeKeys.TRAIN
       layers = [features]
-      layers.append(tf.layers.dense(layers[-1], 4*4*1024, activation=leaky_relu))
+      layers.append(tf.layers.dense(layers[-1], 7*7*256, activation=tf.nn.elu))
       layers.append(tf.layers.batch_normalization(layers[-1], training=training))
-      layers.append(tf.reshape(layers[-1], [-1, 4, 4, 1024]))
+      layers.append(tf.reshape(layers[-1], [-1, 7, 7, 256]))
+      layers.append(self.deconv_bn_nonlinearity(
+        layers[-1], 128, [5, 5], [2, 2],'same', tf.nn.elu, training))
       layers.append(tf.layers.conv2d_transpose(
-        inputs=layers[-1],
-        filters=512,
-        kernel_size=[5, 5],
-        strides=[2, 2],
-        padding='same',
-        activation=leaky_relu))
-      layers.append(tf.layers.batch_normalization(layers[-1], training=training))
-      layers.append(tf.layers.conv2d_transpose(
-        inputs=layers[-1],
-        filters=256,
-        kernel_size=[5, 5],
-        strides=[2, 2],
-        padding='same',
-        activation=leaky_relu))
-      layers.append(tf.layers.batch_normalization(layers[-1], training=training))
-      # layers.append(tf.layers.conv2d_transpose(
-      #   inputs=layers[-1],
-      #   filters=128,
-      #   kernel_size=[5, 5],
-      #   strides=[2, 2],
-      #   padding='same',
-      #   activation=leaky_relu))
-      # layers.append(tf.layers.batch_normalization(layers[-1], training=training))
-      layers.append(tf.layers.conv2d_transpose(
-        inputs=layers[-1],
-        filters=1,
-        kernel_size=[5, 5],
-        strides=[2, 2],
-        padding='same',
-        activation=tf.nn.tanh))
+        layers[-1], 1, [5, 5], [2, 2], 'same', activation=tf.nn.tanh))
+      for l in layers:
+        print l
       return layers[-1]
 
 class Discriminator:
   def __init__(self):
     pass
 
+  def conv_bn_nonlinearity(self, inputs, filters, kernel_size, strides, padding,
+      activation, training):
+    conv = tf.layers.conv2d(
+        inputs=inputs,
+        filters=filters,
+        kernel_size=kernel_size,
+        strides=strides,
+        padding=padding,
+        activation=None,
+        kernel_regularizer=tf.contrib.layers.l2_regularizer(1.0),
+        bias_regularizer=tf.contrib.layers.l2_regularizer(1.0))
+    bn = tf.layers.batch_normalization(conv, training=training)
+    a = activation(bn)
+    return a
+
   def discriminator_fn(self, features, labels, mode, reuse):
     with tf.variable_scope('discriminator', reuse=reuse):
       training = mode == tf.estimator.ModeKeys.TRAIN
       layers = [features]
-      layers.append(tf.layers.conv2d(
-        layers[-1],
-        filters=64,
-        kernel_size=[5, 5],
-        strides=[2, 2],
-        padding='same',
-        activation=leaky_relu))
-      layers.append(tf.layers.batch_normalization(layers[-1], training=training))
-      layers.append(tf.layers.conv2d(
-        layers[-1],
-        filters=128,
-        kernel_size=[5, 5],
-        strides=[2, 2],
-        padding='same',
-        activation=leaky_relu))
-      layers.append(tf.layers.batch_normalization(layers[-1], training=training))
-      layers.append(tf.layers.conv2d(
-        layers[-1],
-        filters=256,
-        kernel_size=[5, 5],
-        strides=[2, 2],
-        padding='same',
-        activation=leaky_relu))
-      layers.append(tf.layers.batch_normalization(layers[-1], training=training))
-      # layers.append(tf.layers.conv2d(
-      #   layers[-1],
-      #   filters=512,
-      #   kernel_size=[5, 5],
-      #   strides=[2, 2],
-      #   padding='same',
-      #   activation=leaky_relu))
-      # layers.append(tf.layers.batch_normalization(layers[-1], training=training))
+      layers.append(self.conv_bn_nonlinearity(
+        layers[-1], 128, [5, 5], [2, 2], 'same', tf.nn.elu, training))
+      layers.append(self.conv_bn_nonlinearity(
+        layers[-1], 256, [5, 5], [2, 2], 'same', tf.nn.elu, training))
 
       # Note that this is explicitly None because
       # tf.nn.sigmoid.cross_entropy_with_logits is used in the train step.
       layers.append(tf.reshape(layers[-1], [-1, 4*4*256]))
-      layers.append(tf.layers.dense(layers[-1], 1, activation=None))
+      layers.append(tf.layers.dense(layers[-1], 1, activation=tf.nn.elu))
+      layers.append(tf.layers.batch_normalization(layers[-1], training=training))
+      for l in layers:
+        print l
       return layers[-1]
 
 def main():
   params = {
-      'batch_size' : 1,
-      'z_dim' : 100,
-      'learning_rate' : 0.01,
+      'batch_size' : 128,
+      'z_dim' : 25,
+      'learning_rate' : 0.001,
       'num_g_steps' : 1,
       'num_d_steps' : 2,
       'num_t_steps' : 3}
