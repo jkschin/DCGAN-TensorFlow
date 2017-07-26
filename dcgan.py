@@ -15,6 +15,7 @@ def dcgan_fn(features, labels, mode, params):
   global_step = training_util.get_global_step()
   real_images = features['real_images']
   zs = features['zs']
+
   sampled_images = params['generator_fn'](zs, None, mode, False)
   assert real_images.shape == sampled_images.shape
   D_logits_real = params['discriminator_fn'](real_images, None, mode, False)
@@ -31,21 +32,26 @@ def dcgan_fn(features, labels, mode, params):
 
   # label smoothing used from Salimans et al. 2016
   if mode != tf.estimator.ModeKeys.PREDICT:
-    g_loss = tf.reduce_mean(
-        tf.nn.sigmoid_cross_entropy_with_logits(
-          logits=D_logits_fake,
-          labels=tf.random_uniform(tf.shape(D_logits_fake), 0.7, 1.0)),
-        name='g_loss')
-    d_loss_real = tf.reduce_mean(
-        tf.nn.sigmoid_cross_entropy_with_logits(
-          logits=D_logits_real,
-          labels=tf.random_uniform(tf.shape(D_logits_real), 0.7, 1.0)),
-        name='d_loss_real')
-    d_loss_fake = tf.reduce_mean(
-        tf.nn.sigmoid_cross_entropy_with_logits(
-          logits=D_logits_fake,
-          labels=tf.random_uniform(tf.shape(D_logits_fake), 0.0, 0.3)),
-        name='d_loss_fake')
+    if params['improvements'] == 'WGAN':
+      g_loss = -tf.reduce_mean(D_logits_fake, name='g_loss')
+      d_loss_real = -tf.reduce_mean(D_logits_real, name='d_loss_real')
+      d_loss_fake = tf.reduce_mean(D_logits_fake, name='d_loss_fake')
+    elif params['improvements'] == 'GAN':
+      g_loss = tf.reduce_mean(
+          tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=D_logits_fake,
+            labels=tf.random_uniform(tf.shape(D_logits_fake), 0.7, 1.0)),
+          name='g_loss')
+      d_loss_real = tf.reduce_mean(
+          tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=D_logits_real,
+            labels=tf.random_uniform(tf.shape(D_logits_real), 0.7, 1.0)),
+          name='d_loss_real')
+      d_loss_fake = tf.reduce_mean(
+          tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=D_logits_fake,
+            labels=tf.random_uniform(tf.shape(D_logits_fake), 0.0, 0.3)),
+          name='d_loss_fake')
     # hack to select only all real or all generated to optimize D
     sel = tf.random_uniform([1], 0, 1)[0]
     d_loss = tf.cond(tf.less_equal(sel, 0.5), lambda: d_loss_real, lambda:
@@ -69,6 +75,18 @@ def dcgan_fn(features, labels, mode, params):
     with tf.control_dependencies([mod, optim_op]):
       global_inc_op = tf.assign_add(global_step, 1, use_locking=True)
     train_op = tf.group(optim_op, global_inc_op)
+
+    # WGAN suggests to clip values by a constant.
+    # https://arxiv.org/pdf/1701.07875.pdf
+    if params['improvements'] == 'WGAN':
+      with tf.control_dependencies([train_op]):
+        for v in (g_vars + d_vars):
+          if 'batch_normalization' not in v.name:
+            tf.clip_by_value(
+                v,
+                params['clip_value_min'],
+                params['clip_value_max'],
+                name='vars_clip')
 
   summary_zs = tf.reshape(zs, (params['batch_size'], 10, 10, 1))
   tf.summary.image('real_images', real_images, max_outputs=10)
