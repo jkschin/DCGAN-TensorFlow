@@ -1,4 +1,5 @@
 import argparse
+import cv2
 import itertools
 import numpy as np
 import tensorflow as tf
@@ -37,7 +38,12 @@ def main(params):
       hooks=[logging_hook])
   elif params['mode'] == 'predict':
     pred = dcgan_est.predict(input_fn=lambda: params['input_fn'](params))
-    print np.array(list(itertools.islice(pred, 1)))[0]['sampled_images'].shape
+    data = np.array(list(itertools.islice(pred, 100)))
+    for i in xrange(100):
+      img = data[i]['sampled_images']
+      img *= 127.5
+      img += 127.5
+      cv2.imwrite('%d.png' %i, img)
     print 'Done'
   else:
     raise Exception('Invalid options to mode')
@@ -60,9 +66,9 @@ def parse_arguments():
     help='number of g steps to take')
   parser.add_argument('-nd', '--num_d_steps', type=int, default=1,
     help='number of d steps to take')
-  parser.add_argument('-cvmax', '--clip_value_min', type=int, default=-0.5,
+  parser.add_argument('-cvmax', '--clip_value_min', type=float, default=-0.5,
     help='weights clip value min for WGAN')
-  parser.add_argument('-cvmin', '--clip_value_max', type=int, default=0.5,
+  parser.add_argument('-cvmin', '--clip_value_max', type=float, default=0.5,
     help='weights clip value max for WGAN')
   return parser.parse_args()
 
