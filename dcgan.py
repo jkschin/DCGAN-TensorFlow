@@ -54,8 +54,9 @@ def dcgan_fn(features, labels, mode, params):
           name='d_loss_fake')
     # hack to select only all real or all generated to optimize D
     sel = tf.random_uniform([1], 0, 1)[0]
-    d_loss = tf.cond(tf.less_equal(sel, 0.5), lambda: d_loss_real, lambda:
-        d_loss_fake)
+    d_loss = tf.add(d_loss_real, d_loss_fake, name='d_loss')
+    # d_loss = tf.cond(tf.less_equal(sel, 0.5), lambda: d_loss_real, lambda:
+    #     d_loss_fake)
 
     tf.summary.scalar('g_loss', g_loss)
     tf.summary.scalar('d_loss_real', d_loss_real)

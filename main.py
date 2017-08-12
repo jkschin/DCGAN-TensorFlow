@@ -7,13 +7,12 @@ import dcgan
 
 def main(params):
   config = tf.estimator.RunConfig()
-  config._model_dir = '/tmp/dcgan_model'
+  config._model_dir = 'expt1'
   config._save_summary_steps = 10
   config._save_checkpoints_secs = None
   config._save_checkpoints_steps = 100
   tensors_to_log = {'g_loss': 'g_loss',
-                    'd_loss_fake': 'd_loss_fake',
-                    'd_loss_real': 'd_loss_real',
+                    'd_loss': 'd_loss',
                     'train_gen': 'train_gen',
                     'mod': 'mod',
                     'global_step': 'global_step'}
