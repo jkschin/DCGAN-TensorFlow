@@ -68,9 +68,9 @@ def dcgan_fn(features, labels, mode, params):
         params['learning_rate']).minimize(g_loss, var_list=g_vars)
     d_optim = tf.train.AdamOptimizer(
         params['learning_rate']).minimize(d_loss, var_list=d_vars)
-    optim_op = tf.group(g_optim, d_optim)
-    # optim_op = tf.cond(train_gen, lambda: g_optim, lambda: d_optim,
-    #     name='optim_op')
+    # optim_op = tf.group(g_optim, d_optim)
+    optim_op = tf.cond(train_gen, lambda: g_optim, lambda: d_optim,
+        name='optim_op')
     loss = tf.cond(train_gen, lambda: g_loss, lambda: d_loss, name='loss')
     with tf.control_dependencies([mod, optim_op]):
       global_inc_op = tf.assign_add(global_step, 1, use_locking=True)
@@ -80,7 +80,7 @@ def dcgan_fn(features, labels, mode, params):
     # https://arxiv.org/pdf/1701.07875.pdf
     if params['improvements'] == 'WGAN':
       with tf.control_dependencies([train_op]):
-        for v in (g_vars + d_vars):
+        for v in (d_vars):
           if 'batch_normalization' not in v.name:
             tf.clip_by_value(
                 v,
